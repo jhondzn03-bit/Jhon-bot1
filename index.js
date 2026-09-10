@@ -19,18 +19,24 @@ const rl = readline.createInterface({
     output: process.stdout
 });
 
-const ask = (texto) => new Promise(resolve => {
-    rl.question(texto, resolve);
-});
+const ask = (texto) =>
+    new Promise(resolve => rl.question(texto, resolve));
+
+let iniciando = false;
+let numeroPairing = null;
 
 async function obtenerNumero() {
-    while (true) {
-        let numero = await ask("\n꒐ Ingresa tu número con código de país: ");
+    if (numeroPairing) return numeroPairing;
 
-        numero = numero.replace(/[^0-9]/g, "");
+    while (true) {
+        let numero = await ask(
+            "꒐ Ingresa tu número con código de país: "
+        );
+
+        numero = numero.replace(/\D/g, "");
 
         if (!numero) {
-            console.log("꒐ Debes ingresar un número válido.");
+            console.log("꒐ Número inválido.");
             continue;
         }
 
@@ -39,100 +45,225 @@ async function obtenerNumero() {
             continue;
         }
 
+        numeroPairing = numero;
         return numero;
     }
 }
 
 async function startJhon() {
-    const { state, saveCreds } = await useMultiFileAuthState(
-        path.join(__dirname, "sesion")
-    );
+    if (iniciando) return;
+    iniciando = true;
 
-    const { version } = await fetchLatestBaileysVersion();
+    try {
+        const { state, saveCreds } =
+            await useMultiFileAuthState(
+                path.join(__dirname, "sesion")
+            );
 
-    const Jhon = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: false,
-        browser: ["Chrome", "Chrome", "120.0.0.0"],
-        logger: pino({ level: "silent" }),
-        syncFullHistory: false
-    });
+        const { version } =
+            await fetchLatestBaileysVersion();
 
-    if (config.usePairingCode && !Jhon.authState.creds.registered) {
-        const numero = await obtenerNumero();
+        const Jhon = makeWASocket({
+            version,
+            auth: state,
+            printQRInTerminal: false,
+            browser: ["Windows", "Chrome", "120.0.0.0"],
+            logger: pino({ level: "silent" }),
+            syncFullHistory: false,
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 10000
+        });
 
-        console.log("\n꒐ Solicitando código de vinculación...");
+        Jhon.ev.on("creds.update", saveCreds);
 
-        try {
-            const codigo = await Jhon.requestPairingCode(numero);
+        let pairingSolicitado = false;
+        let conexionAbierta = false;
 
-            console.log(`
+        const solicitarPairing = async () => {
+            if (
+                pairingSolicitado ||
+                conexionAbierta ||
+                state.creds.registered
+            ) {
+                return;
+            }
+
+            pairingSolicitado = true;
+
+            try {
+                const numero = await obtenerNumero();
+
+                console.log(
+                    "\n꒐ Esperando conexión con WhatsApp..."
+                );
+
+                const codigo =
+                    await Jhon.requestPairingCode(numero);
+
+                console.log(`
 ╭─〔 ${config.botName} 〕
 │
 │ ✰ Número: +${numero}
 │ ✰ Código: ${codigo}
 │
-╰─ Vincula este código desde WhatsApp
-            `.trim());
-        } catch (error) {
-            console.log("\n꒐ No se pudo generar el código de vinculación.");
-            console.log(error);
-        }
-    }
+╰─ Ingresa este código en WhatsApp
+                `.trim());
 
-    Jhon.ev.on("creds.update", saveCreds);
+            } catch (error) {
+                pairingSolicitado = false;
 
-    Jhon.ev.on("connection.update", async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === "close") {
-            const motivo = new Boom(lastDisconnect?.error)?.output?.statusCode;
-
-            if (motivo !== DisconnectReason.loggedOut) {
-                console.log("꒐ Conexión cerrada. Reconectando...");
-                setTimeout(() => startJhon(), 3000);
-            } else {
                 console.log(
-                    `> ✰ ${config.botName} cerró sesión. Elimina la carpeta sesion y vuelve a iniciar.`
+                    "\n꒐ No se pudo generar el código de vinculación."
                 );
+
+                console.log(
+                    "꒐ Código:",
+                    error?.output?.statusCode || "desconocido"
+                );
+
+                console.log(
+                    "꒐ Mensaje:",
+                    error?.message || error
+                );
+
+                try {
+                    Jhon.ws?.close();
+                } catch {}
+
+                iniciando = false;
+
+                setTimeout(() => {
+                    startJhon();
+                }, 3000);
             }
-        }
+        };
 
-        if (connection === "open") {
-            console.log(
-                `> ✰ ${config.botName} conectado correctamente ࿇ créditos: ${config.credits}`
-            );
+        Jhon.ev.on("connection.update", async update => {
+            const {
+                connection,
+                lastDisconnect
+            } = update;
 
-            if (rl) {
-                rl.close();
+            if (connection === "open") {
+                conexionAbierta = true;
+                iniciando = false;
+
+                console.log(
+                    `> ✰ ${config.botName} conectado correctamente ࿇ créditos: ${config.credits}`
+                );
+
+                if (rl) {
+                    try {
+                        rl.close();
+                    } catch {}
+                }
+
+                return;
             }
+
+            if (connection === "close") {
+                conexionAbierta = false;
+
+                const motivo =
+                    new Boom(
+                        lastDisconnect?.error
+                    )?.output?.statusCode;
+
+                if (
+                    motivo === DisconnectReason.loggedOut
+                ) {
+                    iniciando = false;
+
+                    console.log(
+                        `> ✰ ${config.botName} cerró sesión. Elimina la carpeta sesion y vuelve a iniciar.`
+                    );
+
+                    return;
+                }
+
+                iniciando = false;
+
+                console.log(
+                    "> ✰ Conexión cerrada. Reconectando..."
+                );
+
+                setTimeout(() => {
+                    startJhon();
+                }, 3000);
+            }
+        });
+
+        await new Promise(resolve => {
+            const verificar = setInterval(() => {
+                if (
+                    Jhon.ws?.readyState === 1
+                ) {
+                    clearInterval(verificar);
+                    resolve();
+                }
+            }, 250);
+
+            setTimeout(() => {
+                clearInterval(verificar);
+                resolve();
+            }, 15000);
+        });
+
+        if (
+            config.usePairingCode &&
+            !state.creds.registered
+        ) {
+            await solicitarPairing();
         }
-    });
 
-    Jhon.ev.on("messages.upsert", async ({ messages }) => {
-        const msg = messages[0];
+        Jhon.ev.on(
+            "messages.upsert",
+            async ({ messages }) => {
+                const msg = messages[0];
 
-        if (!msg?.message) return;
+                if (!msg?.message) return;
 
-        try {
-            await handler(Jhon, msg);
-        } catch (error) {
-            console.log("Error procesando mensaje:", error);
-        }
-    });
+                try {
+                    await handler(Jhon, msg);
+                } catch (error) {
+                    console.log(
+                        "Error procesando mensaje:",
+                        error
+                    );
+                }
+            }
+        );
 
-    Jhon.ev.on("group-participants.update", async (evento) => {
-        try {
-            await welcomeHandler(Jhon, evento);
-        } catch (error) {
-            console.log("Error en bienvenida:", error);
-        }
-    });
+        Jhon.ev.on(
+            "group-participants.update",
+            async evento => {
+                try {
+                    await welcomeHandler(
+                        Jhon,
+                        evento
+                    );
+                } catch (error) {
+                    console.log(
+                        "Error en bienvenida:",
+                        error
+                    );
+                }
+            }
+        );
 
-    return Jhon;
+    } catch (error) {
+        iniciando = false;
+
+        console.log(
+            "Error iniciando Jhon:",
+            error
+        );
+
+        setTimeout(() => {
+            startJhon();
+        }, 3000);
+    }
 }
 
-startJhon().catch(error => {
-    console.error("Error iniciando el bot:", error);
-});
+startJhon();
