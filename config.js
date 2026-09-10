@@ -1,8 +1,7 @@
 module.exports = {
     botName: "Jhon",
     prefix: /^[!./#]/,
-    owner: ["50000000000"],
+    owner: ["50375638328"],
     credits: "Matthieu-x",
-    usePairingCode: true,
-    pairingNumber: "50000000000"
+    usePairingCode: true
 };
